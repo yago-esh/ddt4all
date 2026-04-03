@@ -7,7 +7,7 @@ import zipfile
 import PyQt5.QtCore as core
 import PyQt5.QtWidgets as widgets
 
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QIcon, QPixmap, QFontMetrics
 
 import options
 from uiutils import *
@@ -82,7 +82,8 @@ class labelWidget(widgets.QLabel):
 
         self.area = rect['width'] * rect['height']
         self.setFont(qfnt)
-        self.resize(rect['width'], rect['height'])
+        h = max(rect['height'], QFontMetrics(qfnt).height() + 4)
+        self.resize(rect['width'], h)
         self.setStyleSheet("background: %s; color: %s" % (colorConvert(color), getFontColor(xmldata)))
 
         self.move(rect['left'], rect['top'])
@@ -125,7 +126,8 @@ class labelWidget(widgets.QLabel):
         else:
             self.setText(text)
 
-        self.resize(rect['width'] / self.uiscale, rect['height'] / self.uiscale)
+        h = max(int(rect['height'] / self.uiscale), QFontMetrics(qfnt).height() + 4)
+        self.resize(rect['width'] / self.uiscale, h)
         self.setStyleSheet("background: %s; color: %s" % (color, fontcolor))
 
         self.move(rect['left'] / self.uiscale, rect['top'] / self.uiscale)
@@ -182,20 +184,6 @@ class screenWidget(widgets.QFrame):
         self.screen_width = int(int(xmldata.getAttribute("Width")) / self.uiscale)
         self.screen_height = int(int(xmldata.getAttribute("Height")) / self.uiscale)
         self.setStyleSheet("background-color: %s" % self.screencolor)
-        
-        # Use full width of scroll area viewport if available, otherwise use XML width
-        parent = self.parent()
-        if parent:
-            # Check if parent is a QScrollArea or has a viewport
-            if hasattr(parent, 'viewport'):
-                viewport_width = parent.viewport().width()
-                if viewport_width > self.screen_width:
-                    self.screen_width = viewport_width
-            elif hasattr(parent, 'width'):
-                parent_width = parent.width()
-                if parent_width > self.screen_width:
-                    self.screen_width = parent_width
-        
         self.resize(self.screen_width, self.screen_height)
 
         for elem in getChildNodesByName(xmldata, u"Send"):
@@ -207,20 +195,6 @@ class screenWidget(widgets.QFrame):
         self.screen_width = int(int(jsdata['width']) / self.uiscale)
         self.screen_height = int(int(jsdata['height']) / self.uiscale)
         self.setStyleSheet("background-color: %s" % jsdata['color'])
-        
-        # Use full width of scroll area viewport if available, otherwise use JSON width
-        parent = self.parent()
-        if parent:
-            # Check if parent is a QScrollArea or has a viewport
-            if hasattr(parent, 'viewport'):
-                viewport_width = parent.viewport().width()
-                if viewport_width > self.screen_width:
-                    self.screen_width = viewport_width
-            elif hasattr(parent, 'width'):
-                parent_width = parent.width()
-                if parent_width > self.screen_width:
-                    self.screen_width = parent_width
-        
         self.resize(self.screen_width, self.screen_height)
         self.presend = jsdata['presend']
         self.jsondata = jsdata
@@ -481,12 +455,13 @@ class displayWidget(widgets.QWidget):
             color = 0x55555
 
         self.move(rect['left'], rect['top'])
-        self.resize(rect['width'], rect['height'])
+        h = max(rect['height'], QFontMetrics(qfnt).height() + 4)
+        self.resize(rect['width'], h)
 
         self.qlabel = widgets.QLabel(self)
         self.qlabel.setFont(qfnt)
         self.qlabel.setText(text)
-        self.qlabel.resize(int(width), rect['height'])
+        self.qlabel.resize(int(width), h)
         self.qlabel.setStyleSheet("background-color: %s; color: %s" % (colorConvert(color), getFontColor(display)))
         self.qlabel.setAlignment(core.Qt.AlignLeft)
         self.qlabel.setWordWrap(True)
@@ -494,7 +469,7 @@ class displayWidget(widgets.QWidget):
         self.qlabelval = styleLabel(self)
         self.qlabelval.setFont(qfnt)
         self.qlabelval.setText("")
-        self.qlabelval.resize(rect['width'] - int(width), rect['height'])
+        self.qlabelval.resize(rect['width'] - int(width), h)
         self.qlabelval.setDefaultStyle("background-color: %s; color: %s" % (colorConvert(color), getFontColor(display)))
         self.qlabelval.move(int(width), 0)
 
@@ -549,12 +524,13 @@ class displayWidget(widgets.QWidget):
         data = self.ecurequestsparser.data[text]
 
         self.move(rect['left'] / self.uiscale, rect['top'] / self.uiscale)
-        self.resize(rect['width'] / self.uiscale, rect['height'] / self.uiscale)
+        h = max(int(rect['height'] / self.uiscale), QFontMetrics(qfnt).height() + 4)
+        self.resize(rect['width'] / self.uiscale, h)
 
         self.qlabel = widgets.QLabel(self)
         self.qlabel.setFont(qfnt)
         self.qlabel.setText(text)
-        self.qlabel.resize(int(width), int(rect['height'] / self.uiscale))
+        self.qlabel.resize(int(width), h)
         self.qlabel.setStyleSheet("background-color: %s; color: %s" % (color, fontcolor))
         self.qlabel.setAlignment(core.Qt.AlignLeft)
         self.qlabel.setWordWrap(True)
@@ -562,7 +538,7 @@ class displayWidget(widgets.QWidget):
         self.qlabelval = styleLabel(self)
         self.qlabelval.setFont(qfnt)
         self.qlabelval.setText("")
-        self.qlabelval.resize(int(rect['width'] / self.uiscale - width), int(rect['height'] / self.uiscale))
+        self.qlabelval.resize(int(rect['width'] / self.uiscale - width), h)
         self.qlabelval.setDefaultStyle("background-color: %s; color: %s" % (color, fontcolor))
         self.qlabelval.move(int(width), 0)
 
@@ -663,13 +639,14 @@ class inputWidget(widgets.QWidget):
         if not color:
             color = 0xAAAAAA
 
-        self.resize(rect['width'], rect['height'])
+        h = max(rect['height'], QFontMetrics(qfnt).height() + 4)
+        self.resize(rect['width'], h)
         self.qlabel = widgets.QLabel(self)
         self.qlabel.setWordWrap(True)
         self.qlabel.setFont(qfnt)
         self.qlabel.setText(text)
         self.qlabel.setStyleSheet("background:%s; color:%s" % (colorConvert(color), getFontColor(input)))
-        self.qlabel.resize(int(width), int(rect['height']))
+        self.qlabel.resize(int(width), h)
         self.move(rect['left'], rect['top'])
 
         try:
@@ -685,7 +662,7 @@ class inputWidget(widgets.QWidget):
             for key in sorted(items_ref.keys()):
                 self.editwidget.addItem(key)
 
-            self.editwidget.resize(rect['width'] - int(width), rect['height'])
+            self.editwidget.resize(rect['width'] - int(width), h)
             self.editwidget.move(int(width), 0)
             if data.comment:
                 infos = data.comment + u'\n' + req_name + u' : ' + text + u'\nNumBits=' + unicode(data.bitscount)
@@ -700,8 +677,8 @@ class inputWidget(widgets.QWidget):
             if options.simulation_mode and options.mode_edit:
                 self.editwidget.setEnabled(False)
             self.editwidget.setFont(qfnt)
-            self.editwidget.setText(_("No Value"))
-            self.editwidget.resize(rect['width'] - int(width), rect['height'])
+            self.editwidget.setText(_('No Value'))
+            self.editwidget.resize(rect['width'] - int(width), h)
             self.editwidget.setStyleSheet("background:%s; color:%s" % (colorConvert(color), getFontColor(input)))
             self.editwidget.move(int(width), 0)
             if data.comment:
@@ -728,15 +705,16 @@ class inputWidget(widgets.QWidget):
         qfnt = jsonFont(jsoninput['font'], self.uiscale)
         fntcolor = jsoninput['fontcolor']
 
+        h = max(int(rect['height'] / self.uiscale), QFontMetrics(qfnt).height() + 4)
         self.move(rect['left'] / self.uiscale, rect['top'] / self.uiscale)
-        self.resize(rect['width'] / self.uiscale, rect['height'] / self.uiscale)
+        self.resize(rect['width'] / self.uiscale, h)
 
         self.qlabel = widgets.QLabel(self)
         self.qlabel.setFont(qfnt)
         self.qlabel.setText(text)
         self.qlabel.setStyleSheet("background:%s; color:%s" % (color, jsoninput))
         self.qlabel.setWordWrap(True)
-        self.qlabel.resize(int(width), int(rect['height'] / self.uiscale))
+        self.qlabel.resize(int(width), h)
 
         if not text in self.ecurequestsparser.data:
             print(_("Cannot find data "), text)
@@ -780,7 +758,7 @@ class inputWidget(widgets.QWidget):
         if options.simulation_mode and options.mode_edit:
             self.editwidget.setEnabled(False)
 
-        self.editwidget.resize(int(rect['width'] / self.uiscale - width), int(rect['height'] / self.uiscale))
+        self.editwidget.resize(int(rect['width'] / self.uiscale - width), h)
         self.editwidget.move(int(width), 0)
 
         if not req_name in inputdict:

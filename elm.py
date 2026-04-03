@@ -332,7 +332,7 @@ class DeviceManager:
         """Get optimal connection settings for specific device types"""
         settings = {
             'vlinker': {
-                'baudrate': 38400, 'timeout': 3, 'rtscts': False, 'dsrdtr': False,
+                'baudrate': 115200, 'timeout': 3, 'rtscts': False, 'dsrdtr': False,
                 'stn_support': False, 'stpx_support': False, 'pin_swap': False
             },
             'elm327': {
@@ -997,6 +997,14 @@ class Port:
             except serial.SerialException as e:
                 print(_("Serial error in read_byte: %s") % e)
                 self.connectionStatus = False
+                # On Windows, ClearCommError/PermissionError means the port handle
+                # is no longer valid — close it so a reconnect can succeed
+                try:
+                    if self.hdr:
+                        self.hdr.close()
+                        self.hdr = None
+                except Exception:
+                    self.hdr = None
                 return None
             except Exception as e:
                 print('*' * 40)
@@ -1120,6 +1128,8 @@ class Port:
                 byte = '\n'
             if byte:
                 self.buff += byte
+            else:
+                time.sleep(0.001)  # prevent 100% CPU spin when buffer is empty
             tc = time.time()
             if pattern in self.buff:
                 return self.buff
@@ -1344,12 +1354,6 @@ class ELM:
         elif adapter_type == "VGATE":
             print(text_optional.replace("OBDLink", "VGate"))
             if not options.elm_failed:
-                # Enable STPX mode for VGate adapters
-                try:
-                    self.enable_stpx_mode()
-                    print(_("VGate STPX mode enabled for enhanced long command support"))
-                except Exception as e:
-                    print(f"VGate STPX warning: {e}")
                 print(_("Connection established successfully"))
         elif adapter_type == "ELS27":
             print(text_optional.replace("OBDLink", "ELS27"))
@@ -2098,6 +2102,10 @@ class ELM:
         self.cmd("AT L0")
         self.cmd("AT AL")
         self.cmd("AT CAF0")
+        # Always enable automatic flow control so multi-frame responses are received
+        # completely (ISO-TP continuation frames). CFC0 disables this and causes
+        # truncated responses on clone adapters.
+        self.cmd("AT CFC1")
         if self.ATCFC0:
             self.cmd("AT CFC0")
 
@@ -2364,12 +2372,16 @@ def elm_checker(port, speed, adapter, logview, app):
 
             if len(cm[2].strip()):
 
-                res = options.elm.send_raw(cm[2])
+                cmd = cm[2].strip()
+                res = options.elm.send_raw(cmd)
+                # ATZ resets the device; give ARM-based firmware time to recover
+                if cmd.upper() == 'ATZ':
+                    time.sleep(0.5)
 
                 if 'H' in cm[1].upper():
                     continue
                 total += 1
-                print(cm[2] + " " + res.strip())
+                print(cmd + " " + res.strip())
                 if '?' in res:
                     chre = '<font color=red>[' + _('FAIL') + ']</font>'
                     if 'P' in cm[1].upper():
@@ -2385,7 +2397,7 @@ def elm_checker(port, speed, adapter, logview, app):
                     good += 1
                     vers = cm[0]
 
-                logview.append("%5s %10s %s" % (cm[0], cm[2], chre))
+                logview.append("%5s %10s %s" % (cm[0], cmd, chre))
                 app.processEvents()
 
     if pycom > 0:
