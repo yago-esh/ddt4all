@@ -60,6 +60,10 @@ vehicles = load_this()
 # args
 parser = argparse.ArgumentParser()
 parser.add_argument("-git_test", "--git_workfallowmode", action='store_true', help="Mode build test's")
+parser.add_argument("--autoconnect", action='store_true', help="Auto-connect without showing options dialog")
+parser.add_argument("--adapter", default="VLINKER", help="Adapter type for auto-connect (default: VLINKER)")
+parser.add_argument("--speed", type=int, default=115200, help="Port speed for auto-connect in baud (default: 115200)")
+parser.add_argument("--project", default="", help="Project code to auto-select after connect (e.g. X67)")
 args = parser.parse_args()
 not_qt5_show = args.git_workfallowmode
 
@@ -2262,48 +2266,111 @@ if __name__ == '__main__':
     if not os.path.exists("./logs"):
         os.mkdir("./logs")
 
-    pc = main_window_options()
-    nok = True
-    while nok:
-        pcres = pc.exec_()
+    if args.autoconnect:
+        # --- Auto-connect: bypass the options dialog ---
+        import types
+        available_ports = elm.get_available_ports()
+        auto_port = None
+        auto_port_name = ""
+        if available_ports:
+            for p in available_ports:
+                port_str = p[0]
+                desc = p[1] if len(p) > 1 else ""
+                if any(k in desc.lower() for k in ['vlinker', 'elm327', 'elm', 'obd', 'obdlink']):
+                    auto_port = port_str
+                    auto_port_name = desc
+                    break
+            if not auto_port:
+                auto_port = available_ports[0][0]
+                auto_port_name = available_ports[0][1] if len(available_ports[0]) > 1 else ""
 
-        if pc.mode == 0 or pcres == widgets.QDialog.Rejected:
-            exit(0)
-        if pc.mode == 1:
-            options.promode = False
-            options.simulation_mode = False
-        if pc.mode == 2:
-            options.promode = False
-            options.simulation_mode = True
-            break
-
-        options.port = str(pc.port)
-        port_speed = pc.selectedportspeed
-
-        if not options.port:
+        if not auto_port:
             msgbox = widgets.QMessageBox()
             appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
             msgbox.setWindowIcon(appIcon)
             msgbox.setWindowTitle(version.__appname__)
-            msgbox.setText(_("No COM port selected"))
+            msgbox.setText(_("Auto-connect: no serial port found. Please connect your Vlinker and retry."))
             msgbox.exec_()
+            exit(1)
 
+        pc = types.SimpleNamespace(
+            port=auto_port,
+            adapter=args.adapter,
+            selectedportspeed=args.speed,
+            securitycheck=True,
+            mode=1,
+            raise_port_speed="No",
+        )
+        options.port_name = auto_port_name
+        options.promode = False
+        options.simulation_mode = False
+        options.port = str(pc.port)
+        port_speed = pc.selectedportspeed
         print(_("Initilizing ELM with speed %i...") % port_speed)
         options.elm = elm.ELM(options.port, port_speed, pc.adapter, pc.raise_port_speed)
         if options.elm_failed:
-            pc.show()
-            pc.logview.append(options.get_last_error())
             msgbox = widgets.QMessageBox()
             appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
             msgbox.setWindowIcon(appIcon)
             msgbox.setWindowTitle(version.__appname__)
-            msgbox.setText(_("No ELM327 or OBDLINK-SX detected on COM port ") + options.port)
+            msgbox.setText(_("No ELM327 or OBDLINK-SX detected on COM port ") + options.port + "\n\n" + options.get_last_error())
             msgbox.exec_()
-        else:
-            nok = False
+            exit(1)
+    else:
+        pc = main_window_options()
+        nok = True
+        while nok:
+            pcres = pc.exec_()
+
+            if pc.mode == 0 or pcres == widgets.QDialog.Rejected:
+                exit(0)
+            if pc.mode == 1:
+                options.promode = False
+                options.simulation_mode = False
+            if pc.mode == 2:
+                options.promode = False
+                options.simulation_mode = True
+                break
+
+            options.port = str(pc.port)
+            port_speed = pc.selectedportspeed
+
+            if not options.port:
+                msgbox = widgets.QMessageBox()
+                appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
+                msgbox.setWindowIcon(appIcon)
+                msgbox.setWindowTitle(version.__appname__)
+                msgbox.setText(_("No COM port selected"))
+                msgbox.exec_()
+
+            print(_("Initilizing ELM with speed %i...") % port_speed)
+            options.elm = elm.ELM(options.port, port_speed, pc.adapter, pc.raise_port_speed)
+            if options.elm_failed:
+                pc.show()
+                pc.logview.append(options.get_last_error())
+                msgbox = widgets.QMessageBox()
+                appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
+                msgbox.setWindowIcon(appIcon)
+                msgbox.setWindowTitle(version.__appname__)
+                msgbox.setText(_("No ELM327 or OBDLINK-SX detected on COM port ") + options.port)
+                msgbox.exec_()
+            else:
+                nok = False
 
     w = Main_widget()
     options.main_window = w
+
+    if args.autoconnect and args.project:
+        # Auto-select the requested project in the vehicle combo
+        combo = w.eculistwidget.vehicle_combo
+        project_upper = args.project.upper()
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if data and project_upper in str(data).upper():
+                combo.setCurrentIndex(i)
+                w.eculistwidget.filterProject()
+                break
+
     w.show()
     app.exec_()
 
