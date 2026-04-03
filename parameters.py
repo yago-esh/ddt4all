@@ -4,7 +4,6 @@ import argparse
 import datetime
 import glob
 import os
-import queue
 import time
 import xml.dom.minidom
 import zipfile
@@ -26,52 +25,6 @@ _ = options.translator('ddt4all')
 # TODO :
 # Read freezeframe data // Done (partially)
 # Check ELM response validity (mode + 0x40)
-
-
-class ElmWorker(core.QObject):
-    """Processes ELM327 serial requests in a background thread.
-    All elm.request() calls are serialised through a Queue so the
-    Qt main thread is never blocked waiting for Bluetooth/serial I/O.
-    """
-    response_ready = core.pyqtSignal(str, str)   # (request_name, elm_response)
-
-    def __init__(self):
-        super().__init__()
-        self._queue = queue.Queue()
-        self._active = True
-
-    @core.pyqtSlot()
-    def run(self):
-        while self._active:
-            item = self._queue.get()
-            if item is None:          # stop sentinel
-                break
-            request_name, command, generation = item
-            try:
-                if options.elm and not options.simulation_mode:
-                    response = options.elm.request(command, cache=False)
-                else:
-                    response = '00 ' * 70
-            except Exception as e:
-                response = "ERROR"
-            self.response_ready.emit(request_name, response + "\x00" + str(generation))
-
-    def submit(self, request_name, command, generation=0):
-        """Queue a request from the UI thread (non-blocking)."""
-        if self._active:
-            self._queue.put((request_name, command, generation))
-
-    def flush(self):
-        """Discard all pending items in the queue (call from UI thread before screen change)."""
-        try:
-            while True:
-                self._queue.get_nowait()
-        except queue.Empty:
-            pass
-
-    def stop(self):
-        self._active = False
-        self._queue.put(None)
 
 class ecuCommand(widgets.QDialog):
     def __init__(self, paramview, ecurequestparser, sds):
@@ -284,21 +237,10 @@ class paramWidget(widgets.QWidget):
         self.timer.setSingleShot(True)
         self.tester_timer = core.QTimer()
         self.tester_timer.setSingleShot(False)
-        self.tester_timer.setInterval(2500)  # increased from 1500 ms to reduce UI-thread pressure
+        self.tester_timer.setInterval(1500)
         self.tester_timer.timeout.connect(self.tester_send)
         self.tester_timer.start()
         self.tester_presend_command = ""
-        # --- Background ELM worker thread ---
-        self._pending_display_count = 0
-        self._update_inputs_pending = False
-        self._update_start_time = 0.0
-        self._screen_generation = 0
-        self._elm_worker = ElmWorker()
-        self._elm_thread = core.QThread()
-        self._elm_worker.moveToThread(self._elm_thread)
-        self._elm_thread.started.connect(self._elm_worker.run)
-        self._elm_worker.response_ready.connect(self._on_display_response)
-        self._elm_thread.start()
         self.initXML()
         self.sliding = False
         self.mouseOldX = 0
@@ -322,17 +264,7 @@ class paramWidget(widgets.QWidget):
         if options.auto_refresh:
             return
 
-        # Submit to background worker — does NOT block the UI thread
-        self._elm_worker.submit("__tester__", self.tester_presend_command)
-
-    def _stop_elm_worker(self):
-        """Cleanly shut down the background worker thread."""
-        try:
-            self._elm_worker.stop()
-            self._elm_thread.quit()
-            self._elm_thread.wait(3000)
-        except Exception:
-            pass
+        self.sendElm(self.tester_presend_command, True)
 
     def saveEcu(self, name=None):
         if not name:
@@ -690,11 +622,6 @@ class paramWidget(widgets.QWidget):
             self.logfile = logfile
         self.updatelog = True
         if self.panel:
-            # Invalidate in-flight responses for the old screen
-            self._screen_generation += 1
-            self._pending_display_count = 0
-            self._elm_worker.flush()
-            self.timer.stop()
             self.layout.removeWidget(self.panel)
             self.panel.setParent(None)
             self.panel.close()
@@ -1056,36 +983,13 @@ class paramWidget(widgets.QWidget):
         else:
             self.panel.initJson(screen)
 
+        self.setContentsMargins(0, 0, 0, 0)
+        self.resize(self.panel.screen_width + 50, self.panel.screen_height + 50)
+
         self.drawLabels(screen)
         self.drawDisplays(screen)
         self.drawInputs(screen)
         self.drawButtons(screen)
-
-        # Compute actual content bounds after drawing all children
-        actual_right = self.panel.screen_width
-        actual_bottom = self.panel.screen_height
-        for child in self.panel.children():
-            if isinstance(child, widgets.QWidget):
-                child_right = child.x() + child.width()
-                child_bottom = child.y() + child.height()
-                if child_right > actual_right:
-                    actual_right = child_right
-                if child_bottom > actual_bottom:
-                    actual_bottom = child_bottom
-        self.panel.screen_width = actual_right
-        self.panel.screen_height = actual_bottom
-        self.panel.resize(actual_right, actual_bottom)
-
-        # Expand panel to fill viewport when content is narrower
-        if hasattr(self.scrollarea, 'viewport'):
-            vp_w = self.scrollarea.viewport().width()
-            if vp_w > self.panel.screen_width:
-                self.panel.screen_width = vp_w
-                self.panel.resize(vp_w, self.panel.screen_height)
-
-        self.setContentsMargins(0, 0, 0, 0)
-        self.resize(self.panel.screen_width + 4, self.panel.screen_height + 4)
-
         self.updateDisplays(True)
         self.timer.timeout.connect(self.updateDisplays)
         return True
@@ -1389,84 +1293,64 @@ class paramWidget(widgets.QWidget):
 
         if not self.allow_parameters_update:
             return
+        start_time = time.time()
+        # <Screen> <Send/> <Screen/> tag management
+        # Manage pre send commands
 
         self.startDiagnosticSession()
 
         if not options.auto_refresh:
-            # Non-auto mode: presend commands run synchronously (user-triggered, one-shot)
             for sendcom in self.panel.presend:
                 delay = float(sendcom['Delay'])
                 req_name = sendcom['RequestName']
+
                 time.sleep(delay / 1000.)
                 request = self.getRequest(self.ecurequestsparser.requests, req_name)
                 if not request:
                     self.logview.append(_("Cannot call request ") + req_name)
-                    continue
                 self.sendElm(request.sentbytes, True)
 
-        # Collect the display requests that need to be sent
-        pending_requests = []
-        for request_name in list(self.displaydict.keys()):
-            request_data = self.displaydict[request_name]
-            if not request_data.request.manualsend:
-                pending_requests.append((request_name, request_data.request.sentbytes))
-
-        if not pending_requests:
-            self.updatelog = False
-            if options.auto_refresh:
-                self.timer.start(options.refreshrate)
-            return
-
-        # Initialise async tracking state
-        self._update_inputs_pending = update_inputs
-        self._update_start_time = time.time()
-        self.record_time = self._update_start_time
         self.recorddict = {}
-        self._pending_display_count = len(pending_requests)
+        for request_name in self.displaydict.keys():
+            self.updateDisplay(request_name, update_inputs)
 
-        # Submit all requests to the background worker (non-blocking)
-        generation = self._screen_generation
-        for request_name, sentbytes in pending_requests:
-            self._elm_worker.submit(request_name, sentbytes, generation)
+        if options.auto_refresh:
+            elapsed_time = time.time() - self.record_time
+            current_time = '{:.3f}'.format(elapsed_time * 1000.0)
+            lst = []
+            lst.append(current_time)
+            for key in self.record_keys:
+                if key in self.recorddict.keys():
+                    if key in self.recorddict:
+                        lst.append(self.recorddict[key])
+                    else:
+                        lst.append("N/A")
+            self.record_values.append(lst)
+
+        elapsed_time = time.time() - start_time
+        if self.infobox:
+            text = _("Update time")
+            self.infobox.setText(f'{text} {elapsed_time * 1000.0:.3f} ms')
+        # Stop log
+        self.updatelog = False
+        if options.auto_refresh:
+            self.timer.start(options.refreshrate)
 
     def updateDisplay(self, request_name, update_inputs=False):
-        """Kept for compatibility; delegates to the async path."""
-        if request_name not in self.displaydict:
-            return
-        request_data = self.displaydict[request_name]
-        if request_data.request.manualsend:
-            return
-        self._update_inputs_pending = update_inputs
-        self._pending_display_count += 1
-        self._elm_worker.submit(request_name, request_data.request.sentbytes, self._screen_generation)
-
-    @core.pyqtSlot(str, str)
-    def _on_display_response(self, request_name, elm_response):
-        """Called on the UI thread when the worker has an ELM response ready."""
-        # Ignore keepalive / tester-present responses
-        if request_name.startswith("__"):
-            return
-
-        # Strip the generation tag appended by the worker
-        if "\x00" in elm_response:
-            elm_response, gen_str = elm_response.rsplit("\x00", 1)
-            try:
-                if int(gen_str) != self._screen_generation:
-                    # Response is from a previous screen — discard it
-                    self._pending_display_count = max(0, self._pending_display_count - 1)
-                    return
-            except ValueError:
-                pass
-
-        if request_name not in self.displaydict:
-            self._pending_display_count = max(0, self._pending_display_count - 1)
-            self._check_all_display_done()
-            return
-
-        update_inputs = self._update_inputs_pending
         request_data = self.displaydict[request_name]
         request = request_data.request
 
+        if request.manualsend:
+            return
+
+        ecu_bytes_to_send = request.sentbytes.encode('ascii')
+        elm_response = self.sendElm(ecu_bytes_to_send, True)
+
+        # Test data for offline test, below is UCT_X84 (roof) parameter misc timings and values
+        # elm_response = "61 0A 16 32 32 02 58 00 B4 3C 3C 1E 3C 0A 0A 0A 0A 01 2C 5C 61 67 B5 BB C1 0A 5C"
+        # Test data for DAE_X84
+        # elm_response = "61 01 0E 0E FF FF 70 00 00 00 00 01 11 64 00 00 EC 00 00 00"
+        # elm_response = "61 08 F3 0C 48 00 00 00 00 F3 0C 48 00 00 00 00 00 00 00 00 00 00 00 FF 48 FF FF"
         logdict = {}
         for data_struct in request_data.data:
             qlabel = data_struct.widget
@@ -1480,7 +1364,10 @@ class paramWidget(widgets.QWidget):
             else:
                 qlabel.resetDefaultStyle()
 
-            out_value = value if value is not None else "N/A"
+            out_value = "N/A"
+            if value is not None:
+                out_value = value
+
             logdict[data_item.name] = out_value
 
             if options.auto_refresh:
@@ -1490,50 +1377,29 @@ class paramWidget(widgets.QWidget):
 
             if update_inputs:
                 for inputkey in self.inputdict:
-                    inp = self.inputdict[inputkey]
-                    if ecu_data.name in inp.datadict:
-                        data = inp.datadict[ecu_data.name]
+                    input = self.inputdict[inputkey]
+                    if ecu_data.name in input.datadict:
+                        data = input.datadict[ecu_data.name]
                         if not data.is_combo:
                             data.widget.setText(value)
                         else:
                             combovalueindex = -1
                             for i in range(data.widget.count()):
-                                if data.widget.itemText(i) == value:
+                                itemname = data.widget.itemText(i)
+                                if itemname == value:
                                     combovalueindex = i
                                     break
+
                             if combovalueindex != -1:
                                 data.widget.setCurrentIndex(combovalueindex)
 
         if self.updatelog and self.logfile is not None:
             self.logfile.write("\t@ " + datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3] + "\n")
             self.logfile.write("\tScreen : " + self.pagename + "\tRequest : " + request_name + "\n")
-            self.logfile.write(u"\t\t" + json.dumps(logdict) + "\n")
+            string = json.dumps(logdict)
+            self.logfile.write(u"\t\t" + string)
+            self.logfile.write("\n")
             self.logfile.flush()
-
-        self._pending_display_count = max(0, self._pending_display_count - 1)
-        self._check_all_display_done()
-
-    def _check_all_display_done(self):
-        """Called after each response; finalises the update cycle when all are received."""
-        if self._pending_display_count > 0:
-            return
-
-        if options.auto_refresh:
-            elapsed_time = time.time() - self._update_start_time
-            current_time = '{:.3f}'.format(elapsed_time * 1000.0)
-            lst = [current_time]
-            for key in self.record_keys:
-                lst.append(self.recorddict.get(key, "N/A"))
-            self.record_values.append(lst)
-
-        elapsed_time = time.time() - self._update_start_time
-        if self.infobox:
-            text = _("Update time")
-            self.infobox.setText(f'{text} {elapsed_time * 1000.0:.3f} ms')
-
-        self.updatelog = False
-        if options.auto_refresh:
-            self.timer.start(options.refreshrate)
 
     def setCanTimeout(self):
         if not options.simulation_mode:
@@ -1614,13 +1480,7 @@ class paramWidget(widgets.QWidget):
         bytestosend = list(map(''.join, zip(*[iter(request.sentbytes)] * 2)))
 
         dtcread_command = ''.join(bytestosend)
-        # Extend timeout so multi-frame ISO-TP responses arrive completely
-        # (clone adapters like VLinker need extra time for continuation frames)
-        if options.elm is not None:
-            options.elm.set_can_timeout(1500)
         can_response = self.sendElm(dtcread_command)
-        if options.elm is not None:
-            options.elm.set_can_timeout(options.cantimeout)
 
         moredtcread_command = None
         if 'MoreDTC' in request.sendbyte_dataitems:
@@ -1650,10 +1510,7 @@ class paramWidget(widgets.QWidget):
             return
 
         # Handle no DTC
-        # KWP2000 no-DTC: "57 00" → len == 2
-        # UDS 19/02 no-DTC: "59 02 FF" → len == 3, byte[0]='59' (no DTC records follow header)
-        uds_no_dtc = (len(can_response) == 3 and can_response[0].upper() == '59')
-        if len(can_response) == 2 or uds_no_dtc:
+        if len(can_response) == 2:
             # No errors
             msgbox = widgets.QMessageBox()
             appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
@@ -1676,26 +1533,7 @@ class paramWidget(widgets.QWidget):
                 can_response += more_can_response[2:]
                 maxcount -= 1
 
-        # Calculate DTC count.
-        # UDS 19/02 format: "59 02 FF [DTC1x4bytes] [DTC2x4bytes]..."
-        #   byte[1]='02' is sub-function echo, NOT the count.
-        #   Derive count from actual data length: (total - 3 header bytes) / shiftbytecount
-        # KWP2000 format: "57 <count> [DTCs]"
-        #   byte[1] IS the count.
-        if can_response[0].upper() == '59' and shiftbytecount > 0:
-            actual_data = max(0, len(can_response) - 3)
-            numberofdtc = actual_data // shiftbytecount
-        else:
-            numberofdtc = int('0x' + can_response[1], 16)
-
-        if numberofdtc == 0:
-            msgbox = widgets.QMessageBox()
-            appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
-            msgbox.setWindowIcon(appIcon)
-            msgbox.setWindowTitle(version.__appname__)
-            msgbox.setText(_("No DTC"))
-            msgbox.exec_()
-            return
+        numberofdtc = int('0x' + can_response[1], 16)
         self.dtcdialog = widgets.QDialog(None)
         # Set window icon and title
         appIcon = gui.QIcon("ddt4all_data/icons/obd.png")
