@@ -64,6 +64,7 @@ parser.add_argument("--autoconnect", action='store_true', help="Auto-connect wit
 parser.add_argument("--adapter", default="VLINKER", help="Adapter type for auto-connect (default: VLINKER)")
 parser.add_argument("--speed", type=int, default=115200, help="Port speed for auto-connect in baud (default: 115200)")
 parser.add_argument("--project", default="", help="Project code to auto-select after connect (e.g. X67)")
+parser.add_argument("--port", default="", help="Serial port for auto-connect (e.g. COM6). If not specified, auto-detects.")
 args = parser.parse_args()
 not_qt5_show = args.git_workfallowmode
 
@@ -2269,20 +2270,27 @@ if __name__ == '__main__':
     if args.autoconnect:
         # --- Auto-connect: bypass the options dialog ---
         import types
-        available_ports = elm.get_available_ports()
         auto_port = None
         auto_port_name = ""
-        if available_ports:
-            for p in available_ports:
-                port_str = p[0]
-                desc = p[1] if len(p) > 1 else ""
-                if any(k in desc.lower() for k in ['vlinker', 'elm327', 'elm', 'obd', 'obdlink']):
-                    auto_port = port_str
-                    auto_port_name = desc
-                    break
-            if not auto_port:
-                auto_port = available_ports[0][0]
-                auto_port_name = available_ports[0][1] if len(available_ports[0]) > 1 else ""
+        
+        # If port specified via CLI, use it directly
+        if args.port:
+            auto_port = args.port
+            auto_port_name = f"Specified port: {args.port}"
+        else:
+            # Otherwise auto-detect the port
+            available_ports = elm.get_available_ports()
+            if available_ports:
+                for p in available_ports:
+                    port_str = p[0]
+                    desc = p[1] if len(p) > 1 else ""
+                    if any(k in desc.lower() for k in ['vlinker', 'elm327', 'elm', 'obd', 'obdlink']):
+                        auto_port = port_str
+                        auto_port_name = desc
+                        break
+                if not auto_port:
+                    auto_port = available_ports[0][0]
+                    auto_port_name = available_ports[0][1] if len(available_ports[0]) > 1 else ""
 
         if not auto_port:
             msgbox = widgets.QMessageBox()
